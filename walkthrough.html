@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Walkthrough · WPUSA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:24px; color:#111}
+    h1{font-size:20px;margin:0 0 12px}
+    .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+    select,button,input{font-size:14px;padding:6px 8px}
+    .muted{color:#666;font-size:12px}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
+    th{background:#f5f5f5;text-align:left}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+    .small{font-size:12px;color:#333}
+    .rowline{white-space:nowrap}
+    .wrap{white-space:normal}
+    .ok{color:#0a7}
+    .warn{color:#b60}
+  </style>
+</head>
+<body>
+  <h1>Walkthrough (Manifest Viewer)</h1>
+
+  <div class="bar">
+    <label for="wo">Choose Work Order</label>
+    <select id="wo"><option>Loading…</option></select>
+    <button id="refreshBtn" type="button">Refresh</button>
+  </div>
+
+  <div id="woInfo" class="small muted">No work order selected.</div>
+
+  <table id="itemsTbl" aria-label="Manifest items" style="display:none">
+    <thead>
+      <tr>
+        <th style="width:90px">Line</th>
+        <th style="width:260px">Model / Links</th>
+        <th>Description</th>
+        <th style="width:80px">Qty</th>
+        <th style="width:160px">Room</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody id="itemsBody"></tbody>
+  </table>
+
+  <p class="muted small" style="margin-top:16px">
+    Tip: We can add “Received / Installed” buttons and room-by-room QR after this. Today is just making the Model # clickable to a product page / manual.
+  </p>
+
+  <!-- Supabase client via ESM -->
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.75.0";
+
+    // ▶▶ Replace with YOUR values (you already shared these)
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON_KEY = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ---------- helpers ----------
+    function esc(s){
+      return (s ?? "").toString().replace(/[&<>"']/g, m => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+      }[m]));
+    }
+
+    function prettyDate(iso){
+      try { return new Date(iso).toLocaleString(); } catch { return iso || ""; }
+    }
+
+    // Model cell: SKU on first line, Model (link) + optional manual link on second line
+    function modelCell(it){
+      const sku  = it.sku   ? esc(it.sku)   : "";
+      const mod  = it.model ? esc(it.model) : "";
+      const mu   = it.model_url  || "";
+      const man  = it.manual_url || "";
+
+      const modelPart  = mod ? (mu ? `<a href="${esc(mu)}" target="_blank" rel="noopener">${mod}</a>` : mod) : "";
+      const manualPart = man ? ` · <a href="${esc(man)}" target="_blank" rel="noopener">manual</a>` : "";
+
+      return `${sku}<br/><span class="muted">${modelPart}${manualPart}</span>`;
+    }
+
+    // ---------- UI refs ----------
+    const woSel   = document.getElementById("wo");
+    const woInfo  = document.getElementById("woInfo");
+    const itemsTb = document.getElementById("itemsTbl");
+    const itemsBd = document.getElementById("itemsBody");
+    const refreshBtn = document.getElementById("refreshBtn");
+
+    // ---------- load work orders ----------
+    async function loadWorkOrders(){
+      woSel.innerHTML = `<option>Loading…</option>`;
+      const { data, error } = await supabase
+        .from("work_orders")
+        .select("id, code, title, status, created_at")
+        .order("created_at", { ascending:false });
+
+      if(error){
+        woSel.innerHTML = `<option>Error loading</option>`;
+        woInfo.textContent = `Error loading work orders: ${error.message}`;
+        return;
+      }
+
+      let opts = [`<option value="">— Select —</option>`];
+      for(const w of data){
+        const label = [w.code, w.title].filter(Boolean).join(" — ");
+        opts.push(`<option value="${esc(w.id)}">${esc(label)}</option>`);
+      }
+      woSel.innerHTML = opts.join("");
+      woInfo.textContent = `Loaded ${data.length} work orders.`;
+    }
+
+    // ---------- load items for selected WO ----------
+    async function loadItems(workOrderId){
+      if(!workOrderId){
+        itemsTb.style.display = "none";
+        itemsBd.innerHTML = "";
+        woInfo.textContent = "No work order selected.";
+        return;
+      }
+
+      // show basic WO info
+      const { data: woRows, error: woErr } = await supabase
+        .from("work_orders")
+        .select("id, code, title, status, created_at")
+        .eq("id", workOrderId)
+        .limit(1);
+
+      if(woErr || !woRows || !woRows.length){
+        woInfo.textContent = `Could not load work order details.`;
+      } else {
+        const w = woRows[0];
+        woInfo.innerHTML = `
+          <div><b>Selected Work Order</b></div>
+          <div class="small">ID: <span class="mono">${esc(w.id)}</span></div>
+          <div class="small">Code: ${esc(w.code || "")}</div>
+          <div class="small">Title: ${esc(w.title || "")}</div>
+          <div class="small">Status: ${esc(w.status || "")}</div>
+          <div class="small">Created: ${esc(prettyDate(w.created_at))}</div>
+        `;
+      }
+
+      // fetch manifest items (make sure you added model_url & manual_url columns)
+      const { data: items, error } = await supabase
+        .from("work_order_items")
+        .select("id, line_no, sku, model, description, qty_ordered, room, notes, model_url, manual_url")
+        .eq("work_order_id", workOrderId)
+        .order("line_no", { ascending:true });
+
+      if(error){
+        itemsTb.style.display = "none";
+        itemsBd.innerHTML = "";
+        woInfo.innerHTML += `<div class="warn">Error loading items: ${esc(error.message)}</div>`;
+        return;
+      }
+
+      if(!items.length){
+        itemsTb.style.display = "none";
+        itemsBd.innerHTML = "";
+        woInfo.innerHTML += `<div class="muted">No manifest items found for this work order.</div>`;
+        return;
+      }
+
+      // render
+      const rows = items.map(it => `
+        <tr>
+          <td class="rowline">${esc(it.line_no ?? "")}</td>
+          <td>${modelCell(it)}</td>
+          <td class="wrap">${esc(it.description || "")}</td>
+          <td>${esc(it.qty_ordered ?? "")}</td>
+          <td>${esc(it.room || "")}</td>
+          <td class="wrap">${esc(it.notes || "")}</td>
+        </tr>
+      `);
+      itemsBd.innerHTML = rows.join("");
+      itemsTb.style.display = "";
+    }
+
+    // ---------- events ----------
+    woSel.addEventListener("change", e => loadItems(e.target.value));
+    refreshBtn.addEventListener("click", loadWorkOrders);
+
+    // ---------- boot ----------
+    await loadWorkOrders();
+  </script>
+</body>
+</html>

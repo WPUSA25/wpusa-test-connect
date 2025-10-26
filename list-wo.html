@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>WO Test</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:24px;max-width:800px;margin:0 auto;}
+  pre{background:#f6f6f6;padding:12px;border-radius:8px;white-space:pre-wrap}
+  .ok{color:#0a7e2f}.err{color:#b00020}
+</style>
+</head>
+<body>
+<h1>Work Orders — Test</h1>
+<p>This page will try to SELECT from <code>work_orders</code> and show either data or the exact error.</p>
+<p id="status">Loading…</p>
+<pre id="out"></pre>
+
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+  const SUPABASE_URL = 'https://vczyzoopbpymjezavdhf.supabase.co';
+  const SUPABASE_ANON_KEY = 
+'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM';
+  const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const statusEl = document.getElementById('status');
+  const out = document.getElementById('out');
+
+  try {
+    const { data, error } = await sb
+      .from('work_orders')
+      .select('id, code, title')
+      .order('code', { ascending: true });
+
+    if (error) {
+      statusEl.className = 'err';
+      statusEl.textContent = 'SELECT failed';
+      out.textContent = JSON.stringify({ error }, null, 2);
+    } else {
+      statusEl.className = 'ok';
+      statusEl.textContent = `OK — ${data.length} row(s)`;
+      out.textContent = JSON.stringify(data, null, 2);
+    }
+  } catch (e) {
+    statusEl.className = 'err';
+    statusEl.textContent = 'Runtime error';
+    out.textContent = String(e?.message || e);
+  }
+</script>
+</body>
+</html>

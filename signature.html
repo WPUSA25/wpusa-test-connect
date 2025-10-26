@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Work Order Signature</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    header { margin-bottom: 16px; }
+    label { font-weight: 600; display:block; margin: 12px 0 6px; }
+    input, select, button { font-size: 16px; padding: 8px 10px; }
+    .grid { display: grid; gap: 12px; }
+    .grid.two { grid-template-columns: 1fr 1fr; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+    .box { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 12px 0; }
+    .info { font-size: 14px; color: #666; }
+    #sigWrap { border: 1px dashed #bbb; border-radius: 8px; padding: 12px; }
+    canvas { width: 100%; height: 240px; touch-action: none; background: #fff; display: block; }
+    .buttons { display: flex; gap: 8px; margin-top: 10px; }
+    .ok { color: #0a7; }
+    .err { color: #c00; }
+    .muted { color: #888; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h2>Work Order Signature</h2>
+    <div class="muted">Pick a work order, enter client name + email, sign, then Save.</div>
+  </header>
+
+  <section class="box">
+    <div class="row">
+      <div>
+        <label for="woSelect">Choose a Work Order</label>
+        <select id="woSelect">
+          <option value="">Loading…</option>
+        </select>
+      </div>
+      <div>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </div>
+    <div id="woInfo" class="info"></div>
+  </section>
+
+  <section class="box">
+    <div class="grid two">
+      <div>
+        <label for="signerName">Client / Signer Name</label>
+        <input id="signerName" type="text" placeholder="e.g., Jane Smith" />
+      </div>
+      <div>
+        <label for="signerEmail">Signer Email</label>
+        <input id="signerEmail" type="email" placeholder="e.g., jane@client.com" />
+      </div>
+    </div>
+    <div class="muted">These will be saved with the signature URL on the work order.</div>
+  </section>
+
+  <section class="box">
+    <label>Signature (mouse or touch)</label>
+    <div id="sigWrap">
+      <canvas id="sigCanvas" width="900" height="300"></canvas>
+      <div class="buttons">
+        <button id="clearBtn" type="button">Clear</button>
+        <button id="saveBtn" type="button">Save Signature</button>
+      </div>
+      <div class="muted">A PNG is stored to “tech-uploads/signatures/&lt;WO-ID&gt;/…png”.</div>
+    </div>
+  </section>
+
+  <section class="box">
+    <div id="status" class="muted">Idle.</div>
+  </section>
+
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    // Your Supabase project (from earlier)
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
+
+    // UI refs
+    const woSelect   = document.getElementById('woSelect');
+    const woInfo     = document.getElementById('woInfo');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const statusEl   = document.getElementById('status');
+    const signerName = document.getElementById('signerName');
+    const signerEmail= document.getElementById('signerEmail');
+
+    // Signature canvas
+    const canvas = document.getElementById('sigCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#000';
+
+    let drawing = false;
+    let last = null;
+
+    function posFromEvt(evt) {
+      const rect = canvas.getBoundingClientRect();
+      if (evt.touches && evt.touches[0]) {
+        return {
+          x: (evt.touches[0].clientX - rect.left) * (canvas.width / rect.width),
+          y: (evt.touches[0].clientY - rect.top)  * (canvas.height / rect.height)
+        };
+      }
+      return {
+        x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+        y: (evt.clientY - rect.top)  * (canvas.height / rect.height)
+      };
+    }
+    function startDraw(evt){ drawing = true; last = posFromEvt(evt); evt.preventDefault(); }
+    function moveDraw(evt){
+      if (!drawing) return;
+      const p = posFromEvt(evt);
+      ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+      last = p; evt.preventDefault();
+    }
+    function endDraw(evt){ drawing = false; evt.preventDefault(); }
+
+    canvas.addEventListener('mousedown', startDraw);
+    canvas.addEventListener('mousemove', moveDraw);
+    canvas.addEventListener('mouseup', endDraw);
+    canvas.addEventListener('mouseleave', endDraw);
+    canvas.addEventListener('touchstart', startDraw, { passive:false });
+    canvas.addEventListener('touchmove',  moveDraw,  { passive:false });
+    canvas.addEventListener('touchend',   endDraw,   { passive:false });
+    canvas.addEventListener('touchcancel',endDraw,   { passive:false });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      status('Cleared.');
+    });
+    document.getElementById('saveBtn').addEventListener('click', saveSignature);
+    refreshBtn.addEventListener('click', loadWorkOrders);
+
+    function status(msg, cls){ statusEl.textContent = msg; statusEl.className = cls || 'muted'; }
+
+    async function loadWorkOrders(){
+      status('Loading work orders…');
+      woSelect.innerHTML = `<option value="">Loading…</option>`;
+      const { data, error } = await supabase
+        .from('work_orders')
+        .select('id, code, title, status, created_at')
+        .order('created_at',{ascending:false});
+
+      if (error){ status('Load failed: ' + error.message, 'err'); return; }
+
+      woSelect.innerHTML = `<option value="">— Select —</option>`;
+      for (const row of data){
+        const label = `${row.code ?? ''} — ${row.title ?? ''}`.trim();
+        const opt = document.createElement('option');
+        opt.value = row.id;
+        opt.textContent = label || row.id;
+        opt.dataset.title   = row.title   ?? '';
+        opt.dataset.status  = row.status  ?? '';
+        opt.dataset.created = row.created_at ?? '';
+        woSelect.appendChild(opt);
+      }
+      status(`Loaded ${data.length} work orders.`, 'ok');
+    }
+
+    woSelect.addEventListener('change', () => {
+      const opt = woSelect.selectedOptions[0];
+      if (!opt || !opt.value){ woInfo.textContent=''; return; }
+      woInfo.innerHTML =
+        `ID: <b>${opt.value}</b><br>`+
+        `Title: ${opt.dataset.title || ''}<br>`+
+        `Status: ${opt.dataset.status || ''}<br>`+
+        `Created: ${opt.dataset.created || ''}`;
+    });
+
+    async function saveSignature(){
+      const opt = woSelect.selectedOptions[0];
+      if (!opt || !opt.value){ status('Pick a work order first.', 'err'); return; }
+      const woId = opt.value;
+
+      const name  = (signerName.value || '').trim();
+      const email = (signerEmail.value || '').trim();
+      if (!name){ status('Enter signer name.', 'err'); return; }
+      if (!email){ status('Enter signer email.', 'err'); return; }
+
+      // Render canvas → PNG Blob
+      status('Rendering signature…');
+      const dataUrl = canvas.toDataURL('image/png');
+      const blob = await (await fetch(dataUrl)).blob();
+
+      // Upload to storage
+      status('Uploading signature to storage…');
+      const path = `signatures/${woId}/signature-${Date.now()}.png`;
+      const up = await supabase.storage
+        .from('tech-uploads')
+        .upload(path, blob, { upsert: true, contentType: 'image/png' });
+      if (up.error){ status('Upload failed: ' + up.error.message, 'err'); return; }
+
+      // Public URL
+      const pub = supabase.storage.from('tech-uploads').getPublicUrl(path);
+      const publicUrl = pub?.data?.publicUrl;
+      if (!publicUrl){ status('Could not get public URL.', 'err'); return; }
+
+      // Update DB
+      status('Saving link + signer info to work_orders…');
+      const upd = await supabase
+        .from('work_orders')
+        .update({
+          signature_url: publicUrl,
+          signer_name: name,
+          signer_email: email,
+          signed_at: new Date().toISOString(),
+          status: 'walkthrough_signed'
+        })
+        .eq('id', woId);
+
+      if (upd.error){ status('DB update failed: ' + upd.error.message, 'err'); return; }
+
+      status('Signature saved ✔', 'ok');
+    }
+
+    // initial load
+    loadWorkOrders();
+  </script>
+</body>
+</html>

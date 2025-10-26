@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>WO Quick List</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body{font-family:system-ui,Arial,sans-serif;max-width:880px;margin:24px auto;padding:0 12px;}
+  table{border-collapse:collapse;width:100%} th,td{border:1px solid #ddd;padding:8px}
+  th{background:#f6f6f6;text-align:left}
+  .pill{padding:2px 8px;border:1px solid #ddd;border-radius:999px}
+</style>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+const supabase = createClient(
+  "https://vczyzoopbpymjezavdhf.supabase.co",
+  
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM"
+);
+
+async function load() {
+  const t = document.querySelector("#rows");
+  t.innerHTML = "<tr><td colspan=5>Loading…</td></tr>";
+  const { data, error } = await supabase
+    .from("work_orders")
+    .select("id, code, title, status, created_at")
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (error) { t.innerHTML = `<tr><td colspan=5>ERROR: ${error.message}</td></tr>`; return; }
+  if (!data?.length) { t.innerHTML = "<tr><td colspan=5>No rows</td></tr>"; return; }
+  t.innerHTML = "";
+  for (const w of data) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${w.code||""}</td>
+      <td>${w.title||""}</td>
+      <td><span class="pill">${w.status||""}</span></td>
+      <td>${new Date(w.created_at).toLocaleString()}</td>
+      <td>
+        <a href="manifest.html?wo=${encodeURIComponent(w.id)}">Import Manifest</a> |
+        <a href="punchlist.html?wo=${encodeURIComponent(w.id)}">Punchlist</a>
+      </td>`;
+    t.appendChild(tr);
+  }
+}
+window.addEventListener('DOMContentLoaded', load);
+</script>
+</head>
+<body>
+  <h1>Work Orders</h1>
+  <table>
+    <thead><tr><th>Code</th><th>Title</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5">…</td></tr></tbody>
+  </table>
+  <p>Next: click <b>Import Manifest</b> for your WO.</p>
+</body>
+</html>

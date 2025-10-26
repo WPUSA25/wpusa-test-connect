@@ -1,0 +1,446 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Manifest Import</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;max-width:980px;margin:24px auto;padding:0 12px;}
+    h1{margin:0 0 8px;}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    select,input[type=file],button,textarea{font-size:14px;padding:8px}
+    select{min-width:220px}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:6px;font-size:13px}
+    th{background:#f4f4f4;text-align:left}
+    .muted{color:#777;font-size:13px}
+    .ok{color:#0a0}
+    .warn{color:#b36b00}
+    .error{color:#c00}
+    .pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:2px 8px;margin-right:6px;background:#fafafa}
+    details summary{cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{border:1px solid #e6e6e6;border-radius:8px;padding:12px}
+    .sticky{position:sticky;top:0;background:#fff;padding:8px 0}
+    .small{font-size:12px}
+    .mono{font-family:ui-monospace,Consolas,monospace}
+    .danger{outline:2px solid #d33;border-radius:6px}
+  </style>
+
+  <!-- Supabase via esm.sh -->
+  <script type="module" id="supabase-loader">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+    // NOTE: uses your URL + anon key
+    const supabaseUrl = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const supabaseKey = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+    window._supabase = createClient(supabaseUrl, supabaseKey);
+  </script>
+
+  <!-- SheetJS to read xlsx/csv locally -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+</head>
+<body>
+  <div class="sticky">
+    <h1>Manifest Import</h1>
+    <div class="row">
+      <button id="reload">Refresh</button>
+      <span class="muted">Pick Work Order → Upload Excel/CSV → Map (if needed) → Save</span>
+      <span id="status" class="pill muted">Idle</span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>1) Pick Work Order</h3>
+      <div class="row">
+        <select id="woSelect"><option value="">— Loading… —</option></select>
+        <button id="showWo">Show</button>
+      </div>
+      <pre id="woInfo" class="small mono"></pre>
+      <details>
+        <summary class="small">Source</summary>
+        <div class="small">Loads from <span class="mono">public.work_orders (id, code, title, status, created_at)</span>.</div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h3>2) Upload Manifest (XLSX/XLS/CSV)</h3>
+      <input id="file" type="file" accept=".xlsx,.xls,.csv" />
+      <div class="small muted" style="margin-top:6px">
+        Required fields: <span class="pill">manufacturer</span> <span class="pill">model</span> <span class="pill">room</span> <span class="pill">qty</span>  
+        Optional: <span class="pill">description</span> <span class="pill">sku</span> <span class="pill">line_no</span> <span class="pill">notes</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>3) Header Mapping</h3>
+    <div id="mapper" class="row"></div>
+    <div class="small muted">We auto-map based on aliases and remember your choices locally.</div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>4) Preview (Manufacturer → Model → Room)</h3>
+    <div id="previewMsg" class="small muted">No file loaded yet.</div>
+    <div id="preview"></div>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <button id="save" disabled>Save to Supabase</button>
+    <span id="saveMsg" class="small"></span>
+  </div>
+
+<script>
+  // ---------- config ----------
+  const REQUIRED_FIELDS = ["manufacturer","model","room","qty"];
+  const OPTIONAL_FIELDS = ["description","sku","line_no","notes"];
+
+  // Wider aliases so your vendor headers map automatically
+  const FIELD_ALIASES = {
+    manufacturer: ["manufacturer","mfr","brand","vendor","MFG","Manufacturer Name","Manufacturer"],
+    model: ["model","model_no","model_number","mdl","Model #","Model Number","Model"],
+    room: ["room","location","space","Location/Room","Room Name","Area","Zone"],
+    qty: ["qty","quantity","qty_ordered","qnty","count","Qty Ordered","QTY","Quantity"],
+    description: ["description","desc","item_description","name","Item Description","Product Description","Item Name"],
+    sku: ["sku","item","item_no","item_number","part","part_no","Item No","SKU #","Part Number"],
+    line_no: ["line_no","line","lineno","line_number","Line #","Line Number"],
+    notes: ["notes","note","comment","comments","remarks","Internal Notes","Comments"]
+  };
+
+  const supabase = window._supabase;
+  const $ = (id)=>document.getElementById(id);
+  const status = (msg, cls="muted")=>{
+    const el = $("status"); el.textContent = msg; el.className = "pill " + cls;
+  };
+
+  // ---------- state ----------
+  let workOrders = [];
+  let selectedWO = null;
+  let rawRows = [];       // objects from file
+  let columnMap = {};     // logicalField -> actualHeader
+  let normalized = [];    // rows ready to save
+
+  // localStorage keys (remember your mapping per filename)
+  const LS_MAP_KEY = (name)=>`manifest_mapper_${name}`;
+
+  // ---------- WOs ----------
+  async function loadWorkOrders(){
+    status("Loading work orders…");
+    const { data, error } = await supabase
+      .from("work_orders")
+      .select("id, code, title, status, created_at")
+      .order("created_at", { ascending: false });
+    if (error){ status("Error loading WOs","error"); console.error(error); return; }
+    workOrders = data||[];
+    const sel = $("woSelect");
+    sel.innerHTML = '<option value="">— Select —</option>';
+    for (const w of workOrders){
+      const label = (w.code || "(no-code)") + " — " + (w.title || "(untitled)");
+      const opt = document.createElement("option");
+      opt.value = w.id; opt.textContent = label; sel.appendChild(opt);
+    }
+    status("Work orders loaded","ok");
+  }
+
+  function showWOInfo(){
+    const id = $("woSelect").value;
+    // NOTE: work_orders.id is UUID string; select.value is string → direct compare works
+    selectedWO = workOrders.find(w=>w.id===id) || null;
+    $("woInfo").textContent = selectedWO ? JSON.stringify(selectedWO,null,2) : "(none selected)";
+    // enable save if we already have normalized rows
+    $("save").disabled = !(selectedWO && normalized.length);
+  }
+
+  // ---------- mapping ----------
+  function autoMapHeaders(headers){
+    const lower = headers.map(h => (h||"").toString().trim());
+    const map = {};
+    const find = (aliases)=>{
+      // exact match first
+      for (const a of aliases){
+        const idx = lower.findIndex(h => h.toLowerCase() === a.toLowerCase());
+        if (idx>=0) return lower[idx];
+      }
+      // contains fallback
+      for (const a of aliases){
+        const hit = lower.find(h => h.toLowerCase().includes(a.toLowerCase()));
+        if (hit) return hit;
+      }
+      return "";
+    };
+    for (const [logical, aliases] of Object.entries(FIELD_ALIASES)){
+      map[logical] = find(aliases) || "";
+    }
+    return map;
+  }
+
+  function buildMapperUI(headers, fileKey){
+    const host = $("mapper");
+    host.innerHTML = "";
+    const all = [...REQUIRED_FIELDS, ...OPTIONAL_FIELDS];
+
+    const makeSelect = (fieldName)=>{
+      const sel = document.createElement("select");
+      const none = document.createElement("option");
+      none.value = ""; none.textContent = "— not mapped —";
+      sel.appendChild(none);
+
+      headers.forEach(h=>{
+        const o = document.createElement("option");
+        o.value = h; o.textContent = h; sel.appendChild(o);
+      });
+
+      sel.value = columnMap[fieldName] || "";
+      const updateStyles = ()=>{
+        if (REQUIRED_FIELDS.includes(fieldName) && !sel.value){
+          sel.classList.add("danger");
+        } else {
+          sel.classList.remove("danger");
+        }
+      };
+      sel.onchange = ()=>{
+        columnMap[fieldName] = sel.value;
+        updateStyles();
+        // persist mapping for this file name
+        try{ localStorage.setItem(fileKey, JSON.stringify(columnMap)); }catch{}
+        refreshPreview();
+      };
+      updateStyles();
+      return sel;
+    };
+
+    all.forEach(f=>{
+      const wrap = document.createElement("div");
+      wrap.style.minWidth = "220px";
+      const label = document.createElement("label");
+      label.textContent = f + (REQUIRED_FIELDS.includes(f) ? " *" : "");
+      label.style.display = "block";
+      label.style.fontSize = "12px";
+
+      const sel = makeSelect(f);
+      wrap.appendChild(label);
+      wrap.appendChild(sel);
+      host.appendChild(wrap);
+    });
+  }
+
+  // ---------- file parsing ----------
+  function readAsArrayBuffer(file){
+    return new Promise((resolve,reject)=>{
+      const r = new FileReader();
+      r.onload = ()=>resolve(r.result);
+      r.onerror = reject;
+      r.readAsArrayBuffer(file);
+    });
+  }
+  function readAsText(file){
+    return new Promise((resolve,reject)=>{
+      const r = new FileReader();
+      r.onload = ()=>resolve(r.result);
+      r.onerror = reject;
+      r.readAsText(file);
+    });
+  }
+
+  async function onFile(e){
+    const f = e.target.files?.[0];
+    if (!f) return;
+
+    $("preview").innerHTML = "";
+    $("previewMsg").textContent = "Parsing…";
+    status("Parsing file…");
+
+    let wb;
+    try{
+      if (/\.(xlsx|xls)$/i.test(f.name)){
+        const ab = await readAsArrayBuffer(f);
+        wb = XLSX.read(ab, { type:"array" });
+      } else if (/\.csv$/i.test(f.name)){
+        const txt = await readAsText(f);
+        wb = XLSX.read(txt, { type:"string" });
+      } else {
+        $("previewMsg").textContent = "Unsupported file type (use .xlsx/.xls/.csv)";
+        status("Unsupported type","warn");
+        return;
+      }
+    }catch(err){
+      console.error(err);
+      $("previewMsg").textContent = "Could not read file.";
+      status("Parse error","error");
+      return;
+    }
+
+    const sheetName = wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    let rows = XLSX.utils.sheet_to_json(ws, { header:1, defval:"" });
+    if (!rows || rows.length===0){ $("previewMsg").textContent = "No rows found."; status("No rows","warn"); return; }
+
+    // first non-empty row is header
+    let hdrIdx = rows.findIndex(r => r.some(c => (c||"").toString().trim() !== ""));
+    if (hdrIdx<0){ $("previewMsg").textContent = "No header row found."; return; }
+    const headers = rows[hdrIdx].map(h => (h||"").toString().trim());
+    const dataRows = rows.slice(hdrIdx+1).filter(r => r.some(c => (c||"").toString().trim()!==""));
+
+    rawRows = dataRows.map(r=>{
+      const obj={}; headers.forEach((h,i)=>{ obj[h] = (r[i] ?? ""); }); return obj;
+    });
+
+    // restore mapping if we’ve seen this filename before
+    const fileKey = LS_MAP_KEY(f.name);
+    let stored = null;
+    try{ stored = JSON.parse(localStorage.getItem(fileKey)||"null"); }catch{}
+    columnMap = stored || autoMapHeaders(headers);
+
+    buildMapperUI(headers, fileKey);
+    refreshPreview();
+    status("Parsed","ok");
+  }
+
+  function normalizeRows(){
+    const get = (row, logical)=>{ const col = columnMap[logical] || ""; return col ? (row[col] ?? "") : ""; };
+    const out = [];
+    for (const r of rawRows){
+      const manufacturer = String(get(r,"manufacturer")||"").trim();
+      const model = String(get(r,"model")||"").trim();
+      const room = String(get(r,"room")||"").trim();
+      let qty = get(r,"qty"); qty = Number(qty||0) || 0;
+      const description = String(get(r,"description")||"").trim();
+      const sku = String(get(r,"sku")||"").trim();
+      const line_no = String(get(r,"line_no")||"").trim();
+      const notes = String(get(r,"notes")||"").trim();
+
+      if (!manufacturer && !model && !room && !qty && !description && !sku) continue;
+      out.push({ manufacturer, model, room, qty, description, sku, line_no, notes });
+    }
+    return out;
+  }
+
+  function groupForPreview(rows){
+    const tree = {};
+    for (const r of rows){
+      const mfr = r.manufacturer || "(unknown)";
+      const mdl = r.model || "(unknown)";
+      const rm = r.room || "(none)";
+      tree[mfr] ||= {};
+      tree[mfr][mdl] ||= {};
+      tree[mfr][mdl][rm] ||= { qty:0, items:[] };
+      tree[mfr][mdl][rm].qty += (Number(r.qty)||0);
+      tree[mfr][mdl][rm].items.push(r);
+    }
+    return tree;
+  }
+
+  function refreshPreview(){
+    normalized = normalizeRows();
+    const host = $("preview");
+    const msg = $("previewMsg");
+
+    if (!normalized.length){
+      host.innerHTML = "";
+      msg.textContent = "0 usable rows after mapping (map required fields above).";
+      $("save").disabled = true;
+      return;
+    }
+    msg.textContent = `${normalized.length} rows ready.`;
+
+    const grouped = groupForPreview(normalized);
+    const tbl = document.createElement("table");
+    tbl.innerHTML = `
+      <thead>
+        <tr>
+          <th>Manufacturer</th>
+          <th>Model</th>
+          <th>Room</th>
+          <th>Qty (sum)</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tb = tbl.querySelector("tbody");
+    for (const mfr of Object.keys(grouped).sort((a,b)=>a.localeCompare(b))){
+      const byModel = grouped[mfr];
+      for (const mdl of Object.keys(byModel).sort((a,b)=>a.localeCompare(b))){
+        const byRoom = byModel[mdl];
+        for (const rm of Object.keys(byRoom).sort((a,b)=>a.localeCompare(b))){
+          const node = byRoom[rm];
+          const tr = document.createElement("tr");
+          const details = node.items.slice(0,3).map(i=>{
+            const d = [i.sku||"", i.description||"", i.line_no?`ln#${i.line_no}`:""].filter(Boolean).join(" · ");
+            return `<div class="small">${d||"&nbsp;"}</div>`;
+          }).join("");
+          tr.innerHTML = `
+            <td>${escapeHtml(mfr)}</td>
+            <td>${escapeHtml(mdl)}</td>
+            <td>${escapeHtml(rm)}</td>
+            <td>${node.qty}</td>
+            <td>${details || "&nbsp;"}</td>
+          `;
+          tb.appendChild(tr);
+        }
+      }
+    }
+    host.innerHTML = "";
+    host.appendChild(tbl);
+    $("save").disabled = !selectedWO;
+  }
+
+  function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]))}
+
+  // ---------- save ----------
+  async function saveToSupabase(){
+    if (!selectedWO){ alert("Pick a Work Order first."); return; }
+    if (!normalized.length){ alert("No rows to save."); return; }
+
+    status("Saving…");
+    $("save").disabled = true; $("saveMsg").textContent = "";
+
+    // Map to your table columns
+    // Ensure public.work_order_items has: work_order_id (uuid), line_no (text), sku (text),
+    // model (text), description (text), qty_ordered (int), room (text), notes (text), manufacturer (text) [optional]
+    const rows = normalized.map((r, idx)=>({
+      work_order_id: selectedWO.id,
+      line_no: r.line_no || String(idx+1),
+      sku: r.sku || null,
+      model: r.model || null,
+      description: r.description || null,
+      qty_ordered: Number(r.qty)||0,
+      room: r.room || null,
+      notes: r.notes || null,
+      manufacturer: r.manufacturer || null
+    }));
+
+    // If you don't have manufacturer column, uncomment next line:
+    // rows.forEach(x=>delete x.manufacturer);
+
+    // Chunk insert
+    const chunkSize = 500;
+    for (let i=0;i<rows.length;i+=chunkSize){
+      const chunk = rows.slice(i,i+chunkSize);
+      const { error } = await supabase.from("work_order_items").insert(chunk);
+      if (error){
+        console.error(error);
+        status("Save error","error");
+        $("saveMsg").textContent = "Error at batch starting row "+(i+1)+": " + error.message;
+        $("save").disabled = false;
+        return;
+      }
+    }
+    status("Saved","ok");
+    $("saveMsg").textContent = `Saved ${rows.length} rows to work_order_items.`;
+    $("save").disabled = false;
+  }
+
+  // ---------- events ----------
+  $("reload").onclick = loadWorkOrders;
+  $("showWo").onclick = showWOInfo;
+  $("woSelect").onchange = ()=>{ showWOInfo(); if (normalized.length) $("save").disabled = false; };
+  $("file").onchange = onFile;
+  $("save").onclick = saveToSupabase;
+
+  // init
+  loadWorkOrders();
+</script>
+</body>
+</html>

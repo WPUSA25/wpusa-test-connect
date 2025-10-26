@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Manifest Import</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif; margin: 24px; }
+    h1 { font-size: 20px; margin: 0 0 12px; }
+    .row { display: grid; gap: 12px; margin: 12px 0; }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    select, button, input[type=file], textarea { font-size: 14px; padding: 6px 8px; }
+    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .panel { border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fafafa; }
+    .muted { color: #6b7280; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; }
+    th { background: #f3f4f6; text-align: left; }
+    .ok { color: #065f46; }
+    .warn { color: #92400e; }
+    .error { color: #991b1b; }
+    .right { text-align: right; }
+  </style>
+</head>
+<body>
+  <h1>Manifest Import</h1>
+
+  <div class="panel">
+    <div class="toolbar">
+      <label for="woSel"><strong>Choose Work Order</strong></label>
+      <select id="woSel" disabled>
+        <option value="" selected>Loading…</option>
+      </select>
+      <button id="btnRefresh">Refresh</button>
+      <span id="woInfo" class="muted"></span>
+    </div>
+
+    <div id="woDebug" class="muted" style="display:none"></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div><strong>Upload Manifest</strong> <span class="muted">(.xlsx, .xls, .csv)</span></div>
+      <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
+      <div id="fileStatus" class="muted"></div>
+    </div>
+
+    <div class="row">
+      <div class="muted"><em>…or Paste CSV</em></div>
+      <textarea id="pasteCsv" placeholder="Paste CSV here"></textarea>
+      <div class="toolbar">
+        <button id="btnParseCsv">Parse Pasted CSV</button>
+        <button id="btnClear">Clear Preview</button>
+      </div>
+    </div>
+
+    <div class="muted">
+      First row can be anywhere; we auto-detect headers. Expected columns (any order):<br/>
+      <code>line_no, sku, model, description, qty_ordered, room, notes, manufacturer</code><br/>
+      Aliases: <code>line|lineno → line_no</code> · <code>qty|quantity → qty_ordered</code> ·
+      <code>location → room</code> · <code>desc → description</code> · <code>item → sku</code> ·
+      <code>mfr|brand → manufacturer</code>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="toolbar">
+      <strong>Preview</strong>
+      <span id="rowCount" class="muted"></span>
+      <span style="flex:1"></span>
+      <button id="btnSave" disabled>Save to Supabase</button>
+    </div>
+    <div style="overflow:auto; max-height: 60vh;">
+      <table id="grid">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="saveStatus" class="muted"></div>
+  </div>
+
+  <!-- XLSX (UMD, global `XLSX`) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <!-- Supabase (ESM) -->
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.75.0";
+
+    /* ==== CONFIG: replace with your project creds ==== */
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON_KEY = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    /* ======== DOM ======== */
+    const woSel = document.getElementById("woSel");
+    const btnRefresh = document.getElementById("btnRefresh");
+    const woInfo = document.getElementById("woInfo");
+    const woDebug = document.getElementById("woDebug");
+    const fileInput = document.getElementById("fileInput");
+    const fileStatus = document.getElementById("fileStatus");
+    const pasteCsv = document.getElementById("pasteCsv");
+    const btnParseCsv = document.getElementById("btnParseCsv");
+    const btnClear = document.getElementById("btnClear");
+    const btnSave = document.getElementById("btnSave");
+    const grid = document.getElementById("grid");
+    const thead = grid.querySelector("thead");
+    const tbody = grid.querySelector("tbody");
+    const rowCount = document.getElementById("rowCount");
+    const saveStatus = document.getElementById("saveStatus");
+
+    /* ======== STATE ======== */
+    let currentWO = null;             // { id, code, title, ... }
+    let records = [];                 // parsed manifest records
+
+    /* ======== WORK ORDERS ======== */
+    async function loadWorkOrders() {
+      woSel.disabled = true;
+      woSel.innerHTML = `<option value="">Loading…</option>`;
+      woInfo.textContent = "";
+
+      const { data, error } = await supabase
+        .from("work_orders")
+        .select("id, code, title, status, created_at")
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        woSel.innerHTML = `<option value="">(Failed to load)</option>`;
+        woInfo.textContent = `Error: ${error.message}`;
+        console.error(error);
+        return;
+      }
+
+      // show for debugging (what you pasted earlier)
+      woDebug.textContent = "OK. Rows:\n" + JSON.stringify(data, null, 2);
+      woDebug.style.display = "none"; // set to "" if you want to see it
+
+      // build dropdown
+      woSel.innerHTML = `<option value="">— Select —</option>` +
+        data.map(r => {
+          const label = `${r.code ?? "(no-code)"} — ${r.title || ""}`.trim();
+          return `<option value="${r.id}">${label}</option>`;
+        }).join("");
+
+      woSel.disabled = false;
+    }
+
+    function onWOChange() {
+      const id = woSel.value || "";
+      if (!id) {
+        currentWO = null;
+        woInfo.textContent = "";
+        btnSave.disabled = true;
+        return;
+      }
+      // store display text too
+      const opt = woSel.options[woSel.selectedIndex]?.text || "";
+      currentWO = { id, label: opt };
+      woInfo.textContent = `Selected: ${opt}`;
+      btnSave.disabled = (records.length === 0);
+    }
+
+    btnRefresh.addEventListener("click", loadWorkOrders);
+    woSel.addEventListener("change", onWOChange);
+
+    /* ======== HEADER AUTO-DETECT ======== */
+    const CANON = ["line_no","sku","model","description","qty_ordered","room","notes","manufacturer"];
+    const ALIASES = {
+      line_no: ["line","line no","lineno","#","line_no"],
+      sku: ["sku","item","item #","item#","part","part #","part#"],
+      model: ["model","model #","model#","mfg model","mfg#","mdl"],
+      description: ["description","desc","item description","product"],
+      qty_ordered: ["qty","qty ordered","quantity","order qty","ordered","quantity ordered","qty_ordered"],
+      room: ["room","location","area","space","rm"],
+      notes: ["notes","note","comment","comments","remarks"],
+      manufacturer: ["manufacturer","mfr","brand","maker","vendor"]
+    };
+    const norm = s => String(s ?? "").trim().toLowerCase();
+
+    function mapHeaderCell(text){
+      const t = norm(text);
+      if (CANON.includes(t)) return t;
+      for (const key of CANON){
+        if (ALIASES[key].some(a => norm(a) === t)) return key;
+      }
+      return null;
+    }
+
+    function findHeaderRow(rows){
+      const maxScan = Math.min(rows.length, 200);
+      for (let r = 0; r < maxScan; r++){
+        const row = rows[r] || [];
+        const mapping = {};
+        let hits = 0;
+        for (let c = 0; c < row.length; c++){
+          const key = mapHeaderCell(row[c]);
+          if (key && mapping[key] === undefined){
+            mapping[key] = c;
+            hits++;
+          }
+        }
+        if (hits >= 2) return { headerRowIndex: r, mapping };
+      }
+      return null;
+    }
+
+    function buildRecords(rows, headerRowIndex, mapping){
+      const out = [];
+      for (let r = headerRowIndex + 1; r < rows.length; r++){
+        const row = rows[r] || [];
+        const rec = {};
+        for (const key of CANON){
+          const col = mapping[key];
+          rec[key] = (col === undefined) ? "" : String(row[col] ?? "").trim();
+        }
+        const allBlank = CANON.every(k => !rec[k]);
+        if (allBlank) continue;
+        if (rec.qty_ordered !== ""){
+          const n = Number(rec.qty_ordered);
+          rec.qty_ordered = Number.isFinite(n) ? n : rec.qty_ordered;
+        }
+        out.push(rec);
+      }
+      return out;
+    }
+
+    function renderPreview(recs){
+      records = recs;
+      // header
+      thead.innerHTML = `<tr>${CANON.map(k => `<th>${k}</th>`).join("")}</tr>`;
+      // body
+      tbody.innerHTML = records.map(r => `
+        <tr>
+          <td class="right">${r.line_no ?? ""}</td>
+          <td>${r.sku ?? ""}</td>
+          <td>${r.model ?? ""}</td>
+          <td>${r.description ?? ""}</td>
+          <td class="right">${r.qty_ordered ?? ""}</td>
+          <td>${r.room ?? ""}</td>
+          <td>${r.notes ?? ""}</td>
+          <td>${r.manufacturer ?? ""}</td>
+        </tr>
+      `).join("");
+
+      rowCount.textContent = `${records.length} row(s) in preview`;
+      btnSave.disabled = !(currentWO && records.length > 0);
+    }
+
+    /* ======== FILE / CSV HANDLERS ======== */
+    fileInput.addEventListener("change", async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      fileStatus.textContent = `Reading ${f.name}…`;
+      try {
+        const buf = await f.arrayBuffer();
+
+        // CSV quick path
+        if (/\.(csv)$/i.test(f.name)) {
+          const text = new TextDecoder().decode(buf);
+          handleCsvText(text);
+          fileStatus.textContent = `Read CSV: ${f.name}`;
+          return;
+        }
+
+        // XLS/XLSX path
+        const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+        handleSheet(wb);
+      } catch (err) {
+        console.error(err);
+        fileStatus.textContent = `File parse error: ${err.message || err}`;
+      }
+    });
+
+    function handleCsvText(text){
+      // Simple CSV parse via XLSX
+      const wb = XLSX.read(text, { type: "string" });
+      handleSheet(wb);
+    }
+
+    function handleSheet(wb){
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false });
+
+      const found = findHeaderRow(rows);
+      if (!found){
+        alert("Couldn’t find headers. Ensure the sheet has any two of: " + CANON.join(", "));
+        return;
+      }
+      const { headerRowIndex, mapping } = found;
+      const recs = buildRecords(rows, headerRowIndex, mapping);
+      fileStatus.textContent = `Read ${recs.length} row(s). Header detected on row ${headerRowIndex + 1}.`;
+      renderPreview(recs);
+    }
+
+    btnParseCsv.addEventListener("click", () => {
+      const text = pasteCsv.value.trim();
+      if (!text) { alert("Paste CSV first."); return; }
+      try {
+        handleCsvText(text);
+      } catch (e) {
+        alert("CSV parse error: " + (e.message || e));
+      }
+    });
+
+    btnClear.addEventListener("click", () => {
+      records = [];
+      thead.innerHTML = "";
+      tbody.innerHTML = "";
+      rowCount.textContent = "";
+      fileStatus.textContent = "";
+      saveStatus.textContent = "";
+      btnSave.disabled = true;
+      pasteCsv.value = "";
+      fileInput.value = "";
+    });
+
+    /* ======== SAVE TO SUPABASE ======== */
+    btnSave.addEventListener("click", async () => {
+      if (!currentWO?.id) { alert("Pick a Work Order first."); return; }
+      if (!records.length) { alert("Nothing to save."); return; }
+
+      btnSave.disabled = true;
+      saveStatus.textContent = "Saving…";
+
+      // Prepare payload (only columns that exist in DB)
+      const payload = records.map(r => ({
+        work_order_id : currentWO.id,
+        line_no       : toIntOrNull(r.line_no),
+        sku           : emptyToNull(r.sku),
+        model         : emptyToNull(r.model),
+        description   : emptyToNull(r.description),
+        qty_ordered   : toIntOrNull(r.qty_ordered),
+        room          : emptyToNull(r.room),
+        notes         : emptyToNull(r.notes),
+        manufacturer  : emptyToNull(r.manufacturer)
+      }));
+
+      try {
+        // Chunk insert to avoid payload limits (e.g., 500 rows)
+        const chunkSize = 500;
+        for (let i = 0; i < payload.length; i += chunkSize) {
+          const slice = payload.slice(i, i + chunkSize);
+          const { error } = await supabase.from("work_order_items").insert(slice);
+          if (error) throw error;
+        }
+        saveStatus.innerHTML = `<span class="ok">Saved ${payload.length} row(s) to work_order_items for ${currentWO.label}.</span>`;
+      } catch (err) {
+        console.error(err);
+        saveStatus.innerHTML = `<span class="error">Save failed: ${err.message || err}</span>`;
+      } finally {
+        btnSave.disabled = false;
+      }
+    });
+
+    function emptyToNull(v){
+      const s = (v ?? "").toString().trim();
+      return s === "" ? null : s;
+    }
+    function toIntOrNull(v){
+      if (v === null || v === undefined || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.trunc(n) : null;
+    }
+
+    /* ======== BOOT ======== */
+    loadWorkOrders();
+  </script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>WO Test</title>
+  <style>
+    body { font-family: system-ui, Arial; padding: 16px; }
+    pre { background:#f6f6f6; padding:8px; border:1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <h3>Work Orders – Connectivity Test</h3>
+
+  <div>URL: <code id="url"></code></div>
+  <div>Anon Key (first 10): <code id="key"></code></div>
+
+  <button id="btn">Run Test</button>
+  <h4>Result</h4>
+  <pre id="out">Press “Run Test”…</pre>
+
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.75.0";
+
+    // ⬇️ put your real values here
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON_KEY = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+
+    document.getElementById("url").textContent = SUPABASE_URL;
+    document.getElementById("key").textContent = SUPABASE_ANON_KEY.slice(0,10) + "…";
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const out = document.getElementById("out");
+    const btn = document.getElementById("btn");
+    btn.onclick = async () => {
+      out.textContent = "Loading…";
+      try {
+        const { data, error } = await supabase
+          .from("work_orders")
+          .select("id, code, title, status, created_at")
+          .order("created_at", { ascending:false })
+          .limit(10);
+
+        if (error) {
+          out.textContent = "ERROR from Supabase:\n" + JSON.stringify(error, null, 2);
+        } else {
+          out.textContent = "OK. Rows:\n" + JSON.stringify(data, null, 2);
+        }
+      } catch (e) {
+        out.textContent = "JS exception:\n" + (e?.message || e);
+      }
+    };
+  </script>
+</body>
+</html>

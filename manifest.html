@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Manifest Import</title> 
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;max-width:960px;margin:24px auto;padding:0 12px;}
+    h1{margin:0 0 8px;}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    select,input[type=file],button,textarea{font-size:14px;padding:8px}
+    select{min-width:260px}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:6px;font-size:13px}
+    th{background:#f4f4f4;text-align:left}
+    .muted{color:#777;font-size:13px}
+    .warn{color:#b36b00}
+    .ok{color:#090}
+    .pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:2px 8px;margin-right:6px;background:#fafafa}
+    .small{font-size:12px}
+    .mono{font-family:ui-monospace,Consolas,monospace}
+    details summary{cursor:pointer}
+  </style>
+
+  <!-- Supabase + SheetJS -->
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+    import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
+
+    const supabase = createClient(
+      "https://vczyzoopbpymjezavdhf.supabase.co",
+      
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM"
+    );
+    window.supabase = supabase;
+
+    let rawRows = [];
+    let columnMap = {};
+    let normalized = [];
+    let selectedWO = null;
+
+    function $(id){return document.getElementById(id);}
+    function status(msg,cls=""){ $("status").textContent=msg; $("status").className=cls; }
+
+    // Detect header row intelligently
+    function findHeaderRow(rows) {
+      const headerAliases = {
+        manufacturer: ["manufacturer","mfr","brand"],
+        model: ["model","model #","model no"],
+        room: ["room","location"],
+        qty: ["qty","quantity","qnty"],
+        description: ["description","desc"],
+        sku: ["sku","item","part"],
+      };
+      const scoreRow = (cells)=>{
+        const texts=cells.map(c=>String(c||"").trim().toLowerCase());
+        let score=0;
+        const hit=(aliases)=>aliases.some(a=>texts.some(t=>t.includes(a)));
+        if (hit(headerAliases.manufacturer)) score++;
+        if (hit(headerAliases.model)) score++;
+        if (hit(headerAliases.room)) score++;
+        if (hit(headerAliases.qty)) score++;
+        return score;
+      };
+      for(let i=0;i<rows.length;i++){
+        if(scoreRow(rows[i])>=2) return i;
+      }
+      return -1;
+    }
+
+    async function loadWorkOrders(){
+      const {data,error}=await supabase.from("work_orders").select("id,code,title,status,created_at").order("created_at",{ascending:false});
+      if(error){status("Load failed","warn");console.error(error);return;}
+      const sel=$("woSelect");
+      sel.innerHTML=data.map(d=>`<option value="${d.id}">${d.code||"(no code)"} — ${d.title||""}</option>`).join("");
+      status(`Loaded ${data.length} work orders`,"ok");
+    }
+
+    async function onFile(e){
+      const file=e.target.files[0];
+      if(!file) return;
+      status("Reading file...");
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:"array"});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+      const hdrIdx=findHeaderRow(rows);
+      if(hdrIdx<0){status("No header found","warn");return;}
+      const headers=rows[hdrIdx].map(h=>(h||"").toString().trim());
+      rawRows=rows.slice(hdrIdx+1).filter(r=>r.some(c=>(c||"").toString().trim()!==""));
+      $("previewMsg").textContent=`Found header at row ${hdrIdx+1}. Skipped ${hdrIdx} top rows.`;
+      buildMapperUI(headers);
+    }
+
+    function buildMapperUI(headers){
+      const known=["manufacturer","model","room","qty","description","sku"];
+      const html=known.map(k=>{
+        const opts=headers.map(h=>`<option value="${h}">${h}</option>`).join("");
+        return `<div>${k}: <select id="map_${k}"><option value="">--</option>${opts}</select></div>`;
+      }).join("");
+      $("mapper").innerHTML=html;
+      $("mapApply").onclick=()=>{
+        known.forEach(k=>{columnMap[k]=$(`map_${k}`).value});
+        refreshPreview();
+      };
+    }
+
+    function toInt(val){
+      const n=parseInt(String(val??"").replace(/[^0-9.-]/g,""),10);
+      return Number.isFinite(n)?n:NaN;
+    }
+
+    function normalizeRows(){
+      const get=(r,k)=>r[columnMap[k]]||"";
+      const out=[];
+      for(const r of rawRows){
+        const manufacturer=String(get(r,"manufacturer")||"").trim();
+        const model=String(get(r,"model")||"").trim();
+        const room=String(get(r,"room")||"").trim();
+        const qty=toInt(get(r,"qty"));
+        const description=String(get(r,"description")||"").trim();
+        const sku=String(get(r,"sku")||"").trim();
+        if(!manufacturer && !model && !room) continue;
+        if(!Number.isFinite(qty)) continue;
+        out.push({manufacturer,model,room,qty,description,sku});
+      }
+      return out;
+    }
+
+    function refreshPreview(){
+      normalized=normalizeRows();
+      const host=$("preview");
+      if(!normalized.length){host.innerHTML="No usable rows";return;}
+      const tbl=document.createElement("table");
+      tbl.innerHTML=`<thead><tr><th>Manufacturer</th><th>Model</th><th>Room</th><th>Qty</th><th>Description</th></tr></thead><tbody></tbody>`;
+      const tb=tbl.querySelector("tbody");
+      normalized.forEach(r=>{
+        const tr=document.createElement("tr");
+        tr.innerHTML=`<td>${r.manufacturer}</td><td>${r.model}</td><td>${r.room}</td><td>${r.qty}</td><td>${r.description}</td>`;
+        tb.appendChild(tr);
+      });
+      host.innerHTML="";
+      host.appendChild(tbl);
+      $("save").disabled=false;
+      status(`${normalized.length} rows ready`,"ok");
+    }
+
+    async function saveToSupabase(){
+      if(!selectedWO){alert("Select a work order first");return;}
+      if(!normalized.length){alert("No data");return;}
+      const items=normalized.map(r=>({...r,work_order_id:selectedWO}));
+      const {error}=await supabase.from("work_order_items").insert(items);
+      if(error){console.error("Insert error:",error);status("Save failed","warn");}
+      else status("Saved to Supabase!","ok");
+    }
+
+    window.addEventListener("DOMContentLoaded",()=>{
+      loadWorkOrders();
+      $("file").addEventListener("change",onFile);
+      $("woSelect").addEventListener("change",e=>selectedWO=e.target.value);
+      $("save").addEventListener("click",saveToSupabase);
+    });
+  </script>
+</head>
+<body>
+  <h1>Manifest Import</h1>
+  <div class="row">
+    <select id="woSelect"><option>Loading…</option></select>
+    <input id="file" type="file" accept=".xlsx,.xls,.csv" />
+    <button id="save" disabled>Save to Supabase</button>
+    <span id="status" class="pill muted">Idle</span>
+  </div>
+  <div id="previewMsg" class="small muted"></div>
+  <div id="mapper" class="small" style="margin-top:10px;"></div>
+  <button id="mapApply">Apply Mapping</button>
+  <div id="preview" style="margin-top:12px;"></div>
+</body>
+</html>

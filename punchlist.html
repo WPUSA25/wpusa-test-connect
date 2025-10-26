@@ -1,0 +1,175 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Punchlist</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;max-width:960px;margin:24px auto;padding:0 12px}
+    h1{margin:0 0 8px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    select,button,input{font-size:14px;padding:8px}
+    table{border-collapse:collapse;width:100%;margin-top:12px}
+    th,td{border:1px solid #ddd;padding:6px;font-size:13px}
+    th{background:#f4f4f4;text-align:left}
+    .muted{color:#777;font-size:12px}
+    .ok{color:#0a0}
+    .pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:2px 8px;margin-left:8px;background:#fafafa}
+    input.qty{width:80px;text-align:right}
+    input.notes{width:100%}
+  </style>
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+
+    // ====== CONFIG ======
+    const supabase = createClient(
+      "https://vczyzoopbpymjezavdhf.supabase.co",
+      
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM"
+    );
+
+    // ====== DOM helpers ======
+    const $ = id => document.getElementById(id);
+    const setStatus = (t,cls="")=>{
+      const s=$("status"); s.textContent=t; s.className="pill "+cls;
+    };
+
+    // ====== Load Work Orders ======
+    async function loadWorkOrders(){
+      setStatus("Loading work orders…");
+      const { data, error } = await supabase
+        .from("work_orders")
+        .select("id, code, title, status, created_at")
+        .order("created_at",{ascending:false});
+      if(error){ console.error(error); setStatus("Error loading WOs"); return; }
+      const sel=$("wo");
+      sel.innerHTML='<option value="">— Select —</option>';
+      (data||[]).forEach(w=>{
+        const o=document.createElement("option");
+        o.value=w.id;
+        o.textContent=(w.code||"(no-code)")+" — "+(w.title||"(untitled)");
+        sel.appendChild(o);
+      });
+      setStatus("Ready","ok");
+    }
+
+    // ====== Load Items for selected WO ======
+    let items=[]; // [{manufacturer, model, room, qty_ordered, ...}]
+    async function loadItems(){
+      $("tableHost").innerHTML="";
+      $("save").disabled=true;
+      const id=$("wo").value;
+      if(!id){ setStatus("Pick a work order"); return; }
+      setStatus("Loading items…");
+      const { data, error } = await supabase
+        .from("work_order_items")
+        .select("manufacturer, model, room, qty_ordered, description, sku")
+        .eq("work_order_id", id);
+      if(error){ console.error(error); setStatus("Error loading items"); return; }
+      items=data||[];
+      renderTable();
+      setStatus("Items loaded","ok");
+    }
+
+    // ====== Render editable table ======
+    function renderTable(){
+      const host=$("tableHost");
+      if(!items.length){ host.innerHTML='<div class="muted">No items found for this work order.</div>'; return; }
+      const tbl=document.createElement("table");
+      tbl.innerHTML=`
+        <thead>
+          <tr>
+            <th>Manufacturer</th>
+            <th>Model</th>
+            <th>Room</th>
+            <th>Ordered (qty)</th>
+            <th>Missing (qty)</th>
+            <th>Damaged (qty)</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      `;
+      const tb=tbl.querySelector("tbody");
+      items.forEach((r,idx)=>{
+        const tr=document.createElement("tr");
+        tr.innerHTML=`
+          <td>${esc(r.manufacturer||"")}</td>
+          <td>${esc(r.model||"")}</td>
+          <td>${esc(r.room||"")}</td>
+          <td>${r.qty_ordered??0}</td>
+          <td><input class="qty" type="number" min="0" step="1" id="miss_${idx}" /></td>
+          <td><input class="qty" type="number" min="0" step="1" id="dam_${idx}" /></td>
+          <td><input class="notes" type="text" id="note_${idx}" placeholder="optional"/></td>
+        `;
+        tb.appendChild(tr);
+      });
+      host.innerHTML="";
+      host.appendChild(tbl);
+      $("save").disabled=false;
+    }
+    const esc=s=>String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[m]));
+
+    // ====== Save punchlist rows (only rows with >0) ======
+    async function savePunchlist(){
+      const id=$("wo").value;
+      if(!id){ alert("Pick a work order first."); return; }
+      setStatus("Saving…");
+
+      const rows=[];
+      items.forEach((r,idx)=>{
+        const miss=Number($("miss_"+idx)?.value||0);
+        const dam =Number($("dam_"+idx )?.value||0);
+        const note=$("note_"+idx)?.value||"";
+        if(miss>0 || dam>0){
+          rows.push({
+            work_order_id:id,
+            manufacturer:r.manufacturer||null,
+            model:r.model||null,
+            room:r.room||null,
+            qty_ordered:r.qty_ordered||0,
+            qty_missing:miss,
+            qty_damaged:dam,
+            notes:note||null
+          });
+        }
+      });
+
+      if(!rows.length){ setStatus("Nothing to save"); return; }
+
+      // chunk insert (safety)
+      const size=500;
+      for(let i=0;i<rows.length;i+=size){
+        const chunk=rows.slice(i,i+size);
+        const { error } = await supabase.from("punchlists").insert(chunk);
+        if(error){ console.error(error); setStatus("Save error"); alert(error.message); return; }
+      }
+      setStatus("Saved","ok");
+      alert(`Saved ${rows.length} punchlist rows.`);
+    }
+
+    // ====== Events ======
+    $("wo").onchange=loadItems;
+    $("save").onclick=savePunchlist;
+    $("refresh").onclick=loadWorkOrders;
+
+    // init
+    loadWorkOrders();
+  </script>
+</head>
+<body>
+  <h1>Punchlist <span id="status" class="pill">Idle</span></h1>
+  <div class="row" style="margin:8px 0">
+    <button id="refresh">Refresh WOs</button>
+    <select id="wo"><option value="">— Loading… —</option></select>
+    <a href="manifest.html">Manifest Import</a>
+  </div>
+
+  <div class="muted">Enter only items that are <b>missing</b> or <b>damaged</b>. Leave blank if OK.</div>
+  <div id="tableHost" style="margin-top:8px"></div>
+
+  <div class="row" style="margin-top:10px">
+    <button id="save" disabled>Save Punchlist</button>
+  </div>
+</body>
+</html>

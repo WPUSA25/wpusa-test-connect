@@ -1,0 +1,261 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Receiving – Expected vs Received</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;}
+    h1{font-size:20px;margin:0 0 12px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+    label{display:block;font-size:12px;color:#555;margin-bottom:4px}
+    select,button{padding:8px 10px;font-size:14px}
+    .btn{background:#0d6efd;border:none;color:#fff;border-radius:6px;cursor:pointer}
+    .btn:disabled{opacity:.6;cursor:not-allowed}
+    .card{border:1px solid #e5e7eb;border-radius:10px;padding:12px;margin:14px 0;background:#fff}
+    .muted{color:#6b7280;font-size:12px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}
+    th{background:#f9fafb}
+    .ok{color:#16a34a}
+    .warn{color:#b91c1c;font-weight:600}
+    .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+    .pill-ok{background:#dcfce7;color:#166534}
+    .pill-warn{background:#fee2e2;color:#991b1b}
+    #msg{margin:8px 0 0;color:#b91c1c}
+  </style>
+</head>
+<body>
+  <h1>Receiving &nbsp;<span class="muted">— Expected vs Received (by Manufacturer • Model • Room)</span></h1>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="woSelect">Choose a Work Order</label>
+        <select id="woSelect">
+          <option value="">Loading…</option>
+        </select>
+      </div>
+      <div>
+        <button id="refreshBtn" class="btn">Refresh</button>
+      </div>
+      <div class="muted">Pick a Work Order, then compare truck unload counts vs expected manifest totals.</div>
+    </div>
+    <div id="msg"></div>
+  </div>
+
+  <div id="grids" style="display:none">
+    <div class="card">
+      <h3 style="margin:0 0 10px">Expected Totals (Manifest)</h3>
+      <div id="expectedWrap"></div>
+      <div class="muted">Source: <span class="mono">public.vw_expected_room_totals</span></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px">Received Totals (Truck Unloads)</h3>
+      <div id="receivedWrap"></div>
+      <div class="muted">Source: <span class="mono">public.vw_received_room_totals</span></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin:0 0 10px">Variance (Expected − Received)</h3>
+      <div id="varianceWrap"></div>
+      <div class="muted">Source: <span class="mono">public.vw_arrival_variance</span></div>
+    </div>
+  </div>
+
+  <!-- Supabase client (ESM) -->
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2.75.0";
+
+    // 🔐 Your Supabase project (you already shared these)
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON_KEY = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const woSelect = document.getElementById("woSelect");
+    const refreshBtn = document.getElementById("refreshBtn");
+    const msg = document.getElementById("msg");
+    const grids = document.getElementById("grids");
+    const expectedWrap = document.getElementById("expectedWrap");
+    const receivedWrap = document.getElementById("receivedWrap");
+    const varianceWrap = document.getElementById("varianceWrap");
+
+    // Load work orders for the dropdown
+    async function loadWorkOrders() {
+      msg.textContent = "";
+      woSelect.innerHTML = `<option value="">Loading…</option>`;
+      const { data, error } = await supabase
+        .from("work_orders")
+        .select("id, code, title, status, created_at")
+        .order("created_at", { ascending: false })
+        .limit(100);
+
+      if (error) {
+        msg.textContent = "Error loading work orders: " + error.message;
+        return;
+      }
+
+      woSelect.innerHTML = `<option value="">— Select —</option>`;
+      (data || []).forEach((w) => {
+        const opt = document.createElement("option");
+        opt.value = w.id;
+        opt.textContent = `${w.code ?? ""} — ${w.title ?? ""}`.trim();
+        woSelect.appendChild(opt);
+      });
+    }
+
+    // Helper to render a simple table
+    function renderTable(container, rows, columns) {
+      if (!rows || rows.length === 0) {
+        container.innerHTML = `<div class="muted">No rows.</div>`;
+        return;
+      }
+      const thead = `<thead><tr>${columns.map(c => `<th>${c.label}</th>`).join("")}</tr></thead>`;
+      const tbody = `<tbody>${
+        rows.map(r => {
+          return `<tr>${columns.map(c => {
+            const v = (r[c.key] ?? "") + "";
+            return `<td>${escapeHtml(v)}</td>`;
+          }).join("")}</tr>`;
+        }).join("")
+      }</tbody>`;
+      container.innerHTML = `<div style="overflow:auto"><table>${thead}${tbody}</table></div>`;
+    }
+
+    // Variance table with colored tags
+    function renderVariance(container, rows) {
+      if (!rows || rows.length === 0) {
+        container.innerHTML = `<div class="muted">No rows.</div>`;
+        return;
+      }
+      const thead = `
+        <thead><tr>
+          <th>Manufacturer</th><th>Model</th><th>Room</th>
+          <th>Expected</th><th>Received</th><th>Variance</th>
+          <th>Status</th>
+        </tr></thead>`;
+      const tbody = `<tbody>${
+        rows.map(r => {
+          const v = Number(r.qty_variance || 0);
+          const status = v === 0
+            ? `<span class="pill pill-ok">OK</span>`
+            : `<span class="pill pill-warn">MISMATCH</span>`;
+          const cls = v === 0 ? "ok" : "warn";
+          return `<tr>
+            <td>${escapeHtml(r.manufacturer ?? "")}</td>
+            <td class="mono">${escapeHtml(r.model ?? "")}</td>
+            <td>${escapeHtml(r.room ?? "")}</td>
+            <td>${escapeHtml(r.qty_expected ?? "")}</td>
+            <td>${escapeHtml(r.qty_received ?? "")}</td>
+            <td class="${cls}">${v}</td>
+            <td>${status}</td>
+          </tr>`;
+        }).join("")
+      }</tbody>`;
+      container.innerHTML = `<div style="overflow:auto"><table>${thead}${tbody}</table></div>`;
+    }
+
+    function escapeHtml(s) {
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#39;");
+    }
+
+    async function loadGrids(workOrderId) {
+      msg.textContent = "";
+      grids.style.display = "none";
+      expectedWrap.innerHTML = "";
+      receivedWrap.innerHTML = "";
+      varianceWrap.innerHTML = "";
+
+      if (!workOrderId) {
+        msg.textContent = "Pick a work order.";
+        return;
+      }
+
+      // Expected (from manifest)
+      const expQ = supabase
+        .from("vw_expected_room_totals")
+        .select("*")
+        .eq("work_order_id", workOrderId)
+        .order("manufacturer", { ascending: true })
+        .order("model", { ascending: true })
+        .order("room", { ascending: true });
+
+      // Received (from truck unload events)
+      const recQ = supabase
+        .from("vw_received_room_totals")
+        .select("*")
+        .eq("work_order_id", workOrderId)
+        .order("manufacturer", { ascending: true })
+        .order("model", { ascending: true })
+        .order("room", { ascending: true });
+
+      // Variance view
+      const varQ = supabase
+        .from("vw_arrival_variance")
+        .select("*")
+        .eq("work_order_id", workOrderId)
+        .order("manufacturer", { ascending: true })
+        .order("model", { ascending: true })
+        .order("room", { ascending: true });
+
+      const [{ data: exp, error: expErr }, { data: rec, error: recErr }, { data: vari, error: varErr }] =
+        await Promise.all([expQ, recQ, varQ]);
+
+      if (expErr) {
+        msg.textContent = "Expected view error: " + expErr.message + " (Did you create the views in SQL?)";
+        return;
+      }
+      if (recErr) {
+        msg.textContent = "Received view error: " + recErr.message + " (Did you create the views in SQL?)";
+        return;
+      }
+      if (varErr) {
+        msg.textContent = "Variance view error: " + varErr.message + " (Did you create the views in SQL?)";
+        return;
+      }
+
+      renderTable(expectedWrap, exp, [
+        { key:"manufacturer", label:"Manufacturer" },
+        { key:"model",        label:"Model" },
+        { key:"room",         label:"Room" },
+        { key:"qty_expected", label:"Qty Expected" }
+      ]);
+
+      renderTable(receivedWrap, rec, [
+        { key:"manufacturer", label:"Manufacturer" },
+        { key:"model",        label:"Model" },
+        { key:"room",         label:"Room" },
+        { key:"qty_received", label:"Qty Received" }
+      ]);
+
+      renderVariance(varianceWrap, vari);
+
+      grids.style.display = "block";
+    }
+
+    // Events
+    woSelect.addEventListener("change", () => {
+      const id = woSelect.value || "";
+      loadGrids(id);
+    });
+    refreshBtn.addEventListener("click", async () => {
+      await loadWorkOrders();
+      const id = woSelect.value || "";
+      if (id) loadGrids(id);
+    });
+
+    // Init
+    loadWorkOrders().then(() => {
+      // If you want to preselect a WO, do it here.
+    });
+  </script>
+</body>
+</html>

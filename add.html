@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>WPUSA • Add Technician Status</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+  <style>
+    body { padding: 1.25rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    #errorBox { display: none; }
+    #okBox { display: none; }
+  </style>
+</head>
+<body>
+  <h1 class="h4 mb-3">WPUSA — Add Technician Row</h1>
+  <p class="text-muted mb-3">
+    Inserts a row into <span class="mono">technician_status</span>.
+  </p>
+
+  <div id="okBox" class="alert alert-success"></div>
+  <div id="errorBox" class="alert alert-danger"></div>
+
+  <form id="addForm" class="row gy-3">
+    <div class="col-12 col-md-4">
+      <label class="form-label">Technician ID</label>
+      <input class="form-control" id="technician_id" placeholder="e.g., tech001" required />
+    </div>
+
+    <div class="col-12 col-md-4">
+      <label class="form-label">Job ID</label>
+      <input class="form-control" id="job_id" placeholder="e.g., jobA" required />
+    </div>
+
+    <div class="col-12 col-md-4">
+      <label class="form-label">Status</label>
+      <select class="form-select" id="status" required>
+        <option value="pending">pending</option>
+        <option value="in_progress" selected>in_progress</option>
+        <option value="complete">complete</option>
+        <option value="paused">paused</option>
+      </select>
+    </div>
+
+    <div class="col-6 col-md-3">
+      <label class="form-label">Fatigue Level</label>
+      <input type="number" class="form-control" id="fatigue_level" placeholder="0" value="0" />
+    </div>
+
+    <div class="col-12">
+      <label class="form-label">Notes</label>
+      <textarea class="form-control" id="notes" rows="5" placeholder="Walkthrough notes…"></textarea>
+    </div>
+
+    <div class="col-12 d-flex gap-2">
+      <button type="submit" class="btn btn-primary">Save</button>
+      <a href="./list.html" class="btn btn-outline-secondary">Back to List</a>
+    </div>
+  </form>
+
+  <!-- UMD build so it works from a plain file server -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <script>
+    // === Your Supabase project credentials ===
+    const SUPABASE_URL = "https://vczyzoopbpymjezavdhf.supabase.co";
+    const SUPABASE_ANON_KEY = 
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM";
+
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const form = document.getElementById('addForm');
+    const okBox = document.getElementById('okBox');
+    const errorBox = document.getElementById('errorBox');
+
+    function showOk(msg) {
+      okBox.textContent = msg;
+      okBox.style.display = 'block';
+      errorBox.style.display = 'none';
+    }
+    function showError(msg) {
+      errorBox.textContent = msg;
+      errorBox.style.display = 'block';
+      okBox.style.display = 'none';
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const technician_id = document.getElementById('technician_id').value.trim();
+      const job_id = document.getElementById('job_id').value.trim();
+      const status = document.getElementById('status').value;
+      const fatigue_level = Number(document.getElementById('fatigue_level').value || 0);
+      const notes = document.getElementById('notes').value;
+
+      // basic guard
+      if (!technician_id || !job_id) {
+        showError("Technician ID and Job ID are required.");
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('technician_status')
+        .insert([{
+          technician_id,
+          job_id,
+          status,
+          fatigue_level,
+          notes,
+          last_sync: new Date().toISOString(),
+          signature_url: ''
+        }]);
+
+      if (error) {
+        showError(`Insert failed: ${error.message}`);
+      } else {
+        showOk("Saved! Open the list to see it.");
+        // Optionally clear the form:
+        form.reset();
+        document.getElementById('status').value = 'in_progress';
+        document.getElementById('fatigue_level').value = '0';
+      }
+    });
+  </script>
+</body>
+</html>

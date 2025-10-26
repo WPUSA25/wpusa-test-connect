@@ -1,0 +1,178 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Upload Photo to Work Order</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; max-width: 720px; margin: 0 auto; }
+    label { display:block; margin-top:12px; font-weight:600; }
+    input, select, textarea, button { width:100%; padding:10px; margin-top:6px; }
+    button { cursor:pointer; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .help { font-size: 12px; color:#666; }
+    .ok { color: #0a7e2f; }
+    .err { color: #b00020; white-space: pre-wrap; }
+    .preview { margin-top:10px; max-width:100%; border:1px solid #ddd; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <h1>Upload Photo → Work Order</h1>
+
+  <label>Work Order (auto-number → title)</label>
+  <select id="woSelect" required>
+    <option value="">Loading…</option>
+  </select>
+  <div class="help">These codes come from your auto-numbered <code>work_orders.code</code>.</div>
+
+  <div class="row">
+    <div>
+      <label>Caption (optional)</label>
+      <input id="caption" type="text" placeholder="Front room vanity delivered" />
+    </div>
+    <div>
+      <label>Taken at (optional)</label>
+      <input id="takenAt" type="datetime-local" />
+    </div>
+  </div>
+
+  <label>Notes (optional)</label>
+  <textarea id="notes" rows="3" placeholder="Box dented on corner; hardware bag inside."></textarea>
+
+  <label>Photo file (JPG/PNG/HEIC)</label>
+  <input id="fileInput" type="file" accept=".jpg,.jpeg,.png,.heic,image/*" />
+  <img id="preview" class="preview" style="display:none" />
+
+  <button id="uploadBtn">Upload & Link</button>
+
+  <p id="msg" class="help"></p>
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    const SUPABASE_URL = 'https://YOUR-PROJECT.subpabase.co'.replace('subpabase','supabase'); // safety
+    const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+
+    const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const woSelect  = document.getElementById('woSelect');
+    const captionEl = document.getElementById('caption');
+    const takenEl   = document.getElementById('takenAt');
+    const notesEl   = document.getElementById('notes');
+    const fileEl    = document.getElementById('fileInput');
+    const preview   = document.getElementById('preview');
+    const msg       = document.getElementById('msg');
+    const uploadBtn = document.getElementById('uploadBtn');
+
+    // --- Load work orders ordered by numeric code ---
+    async function loadWorkOrders() {
+      msg.textContent = 'Loading work orders…';
+      const { data, error } = await sb
+        .from('work_orders')
+        .select('id, code, title')
+        .order('code', { ascending: true });
+
+      if (error) {
+        msg.className = 'err';
+        msg.textContent = 'Failed to load work orders:\n' + error.message;
+        return;
+      }
+
+      woSelect.innerHTML = '<option value="">Select one…</option>';
+      for (const wo of data) {
+        const opt = document.createElement('option');
+        opt.value = wo.id; // UUID
+        opt.textContent = `${wo.code} — ${wo.title ?? '(no title)'}`;
+        woSelect.appendChild(opt);
+      }
+      msg.className = 'help';
+      msg.textContent = 'Work orders loaded.';
+    }
+
+    // Preview selected image
+    fileEl.addEventListener('change', () => {
+      const f = fileEl.files?.[0];
+      if (!f) { preview.style.display = 'none'; return; }
+      const url = URL.createObjectURL(f);
+      preview.src = url;
+      preview.style.display = 'block';
+    });
+
+    // --- Upload and insert photo row ---
+    uploadBtn.addEventListener('click', async () => {
+      msg.className = 'help';
+      msg.textContent = 'Working…';
+
+      try {
+        const workOrderId = woSelect.value; // UUID
+        if (!workOrderId) throw new Error('Select a work order first.');
+
+        const file = fileEl.files?.[0];
+        if (!file) throw new Error('Choose a photo file to upload.');
+
+        // Get chosen work-order's code (for folder naming)
+        const { data: woRow, error: woErr } = await sb
+          .from('work_orders')
+          .select('code')
+          .eq('id', workOrderId)
+          .single();
+        if (woErr) throw new Error('Could not read selected work order: ' + woErr.message);
+        const code = woRow.code; // like "001", "002", etc.
+
+        // Build a unique storage path: public/<code>/<timestamp>_<filename>
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const cleanName = file.name.replace(/\s+/g, '_');
+        const path = `public/${code}/${ts}_${cleanName}`;
+
+        // Upload to the 'tech-uploads' public bucket
+        const { error: upErr } = await sb
+          .storage
+          .from('tech-uploads')
+          .upload(path, file, {
+            cacheControl: '3600',
+            upsert: false,
+          });
+        if (upErr) throw new Error('Upload failed: ' + upErr.message);
+
+        // Build public URL
+        const { data: pub } = sb
+          .storage
+          .from('tech-uploads')
+          .getPublicUrl(path);
+        const publicUrl = pub?.publicUrl;
+        if (!publicUrl) throw new Error('Could not build public URL.');
+
+        // Taken-at value
+        let takenAt = takenEl.value ? new Date(takenEl.value).toISOString() : new Date().toISOString();
+
+        // Insert into photos table (uses UUID for work_order_id)
+        const { error: insErr } = await sb
+          .from('photos')
+          .insert([{
+            work_order_id: workOrderId,   // UUID
+            url: publicUrl,
+            caption: captionEl.value || null,
+            taken_at: takenAt,
+            notes: notesEl.value || null
+          }]);
+        if (insErr) throw new Error('DB insert failed: ' + insErr.message);
+
+        msg.className = 'ok';
+        msg.textContent = 'Uploaded & linked ✔';
+        // reset light
+        captionEl.value = '';
+        notesEl.value = '';
+        takenEl.value = '';
+        fileEl.value = '';
+        preview.style.display = 'none';
+
+      } catch (e) {
+        msg.className = 'err';
+        msg.textContent = String(e?.message || e);
+      }
+    });
+
+    loadWorkOrders();
+  </script>
+</body>
+</html>

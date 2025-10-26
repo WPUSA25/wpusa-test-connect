@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WO Smoke</title>
+<pre id="out">Loading…</pre>
+<script type="module">
+  import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+  const supabase = createClient(
+    "https://vczyzoopbpymjezavdhf.supabase.co",
+    
+"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZjenl6b29wYnB5bWplemF2ZGhmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk3NjQxMTQsImV4cCI6MjA3NTM0MDExNH0.4y9ji3i8oAAtbyNa5Tjx3nVCY55qa621PJgEDzR3ltM"
+  );
+  const out = document.getElementById("out");
+  const { data, error } = await supabase
+    .from("work_orders")
+    .select("id, code, title, status, created_at")
+    .limit(10);
+  if (error) { out.textContent = "SELECT error:\n" + error.message; console.error(error); }
+  else { out.textContent = JSON.stringify(data, null, 2); }
+</script>
