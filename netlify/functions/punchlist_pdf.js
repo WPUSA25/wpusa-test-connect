@@ -1,227 +1,319 @@
 // netlify/functions/punchlist_pdf.js
-// Branded Punchlist PDF (pdf-lib)
-// - Pulls punchlist + items from Supabase
-// - Draws a crisp header with company + client branding
-// - Gracefully handles missing logos
+// Pro punchlist PDF (branding: dynamic from Supabase work_orders, fallback to Netlify env)
+// Requires: pdf-lib in package.json (you already added it)
 
-const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
-const fetch = require("node-fetch");
+import { PDFDocument, StandardFonts, rgb, degrees } from "pdf-lib";
 
-// --- ENV (configure in Netlify -> Project -> Configuration -> Environment variables) ---
-const SUPABASE_URL = process.env.SUPABASE_URL;                     // e.g. https://vczyzoopbpymjezavdhf.supabase.co
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // service role (server-side only)
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env;
 
-// Optional branding env (safe to start blank; we also allow overrides by query string)
-const COMPANY_NAME = process.env.COMPANY_NAME || "WPUSA";
-const COMPANY_ADDRESS = process.env.COMPANY_ADDRESS || "123 Main St, Anywhere, USA";
-const COMPANY_PHONE = process.env.COMPANY_PHONE || "(555) 555-5555";
-const COMPANY_LOGO_URL = process.env.COMPANY_LOGO_URL || ""; // https URL to a PNG/JPG
-const CLIENT_LOGO_URL = process.env.CLIENT_LOGO_URL || "";   // optional default client logo
+// Optional branding fallbacks (configure in Netlify → Site settings → Environment variables)
+const FALLBACK_BRAND = {
+  companyName: process.env.BRAND_COMPANY_NAME || "WPUSA",
+  companyTagline: process.env.BRAND_COMPANY_TAGLINE || "Field Delivery • Receiving • Punchlist",
+  companyAddress:
+    process.env.BRAND_COMPANY_ADDRESS ||
+    "123 Any Street • Orlando, FL 32801 • (555) 123-4567",
+  companyLogo: process.env.BRAND_LOGO_URL || "", // PNG/JPG URL (optional)
+};
 
-// Helpers
-function q(obj, key, fallback = "") {
-  const v = obj[key];
-  return v === null || v === undefined ? fallback : v;
+const supaFetch = async (path, init = {}) => {
+  const url = `${SUPABASE_URL}${path}`;
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      "Content-Type": "application/json",
+      ...(init.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Supabase error ${res.status}: ${t}`);
+  }
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+};
+
+async function getPunchlistWithItems(punchlistId) {
+  // punchlist
+  const [pl] = await supaFetch(
+    `/rest/v1/punchlists?select=id,work_order_id,created_at,status&id=eq.${punchlistId}`
+  );
+  if (!pl) throw new Error("Punchlist not found");
+
+  // items
+  const items = await supaFetch(
+    `/rest/v1/punchlist_items?select=manufacturer,model,room,expected_qty,received_qty,missing_qty,damaged_qty,issue&punchlist_id=eq.${pl.id}&order=manufacturer.asc,model.asc,room.asc`
+  );
+
+  return { pl, items };
 }
-function supaHeaders(json = true) {
+
+async function getWorkOrderBrand(work_order_id) {
+  // Adjust these column names to match your table (safe defaults used below)
+  // Add these columns if you want dynamic branding per job:
+  //   client_name text
+  //   project_name text
+  //   client_logo_url text
+  //   company_display_name text
+  //   company_logo_url text
+  const [wo] = await supaFetch(
+    `/rest/v1/work_orders?select=code,project_name,client_name,client_logo_url,company_display_name,company_logo_url&id=eq.${work_order_id}`
+  );
+
   return {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    ...(json ? { "Content-Type": "application/json" } : {}),
+    workOrderCode: wo?.code || "",
+    projectName: wo?.project_name || "Demo job",
+    clientName: wo?.client_name || "",
+    clientLogo: wo?.client_logo_url || "",
+    companyDisplayName: wo?.company_display_name || FALLBACK_BRAND.companyName,
+    companyLogo: wo?.company_logo_url || FALLBACK_BRAND.companyLogo,
   };
 }
 
-// Fetch PNG/JPG bytes (optional)
-async function fetchImageBytes(url) {
+async function embedRemoteImage(pdfDoc, url) {
   if (!url) return null;
   try {
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`img ${res.status}`);
-    return new Uint8Array(await res.arrayBuffer());
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("png")) return pdfDoc.embedPng(buf);
+    // default try jpeg
+    return pdfDoc.embedJpg(buf);
   } catch {
     return null;
   }
 }
 
-// Load punchlist + rows
-async function loadPunchlist(punchlist_id) {
-  // punchlist
-  const plRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/punchlists?id=eq.${encodeURIComponent(punchlist_id)}&select=id,work_order_id,status,created_at`,
-    { headers: supaHeaders(false) }
-  );
-  const [pl] = await plRes.json();
-
-  if (!pl) throw new Error("Punchlist not found");
-
-  // work order
-  let wo = null;
-  if (pl.work_order_id) {
-    const woRes = await fetch(
-      `${SUPABASE_URL}/rest/v1/work_orders?id=eq.${encodeURIComponent(pl.work_order_id)}&select=id,code,project`,
-      { headers: supaHeaders(false) }
-    );
-    [wo] = await woRes.json();
+function drawText(page, text, x, y, opts) {
+  const {
+    font,
+    size = 10,
+    color = rgb(0, 0, 0),
+    maxWidth = null,
+    align = "left",
+  } = opts || {};
+  if (!maxWidth) {
+    page.drawText(text, { x, y, size, font, color });
+    return;
   }
-
-  // items
-  const itRes = await fetch(
-    `${SUPABASE_URL}/rest/v1/punchlist_items?select=manufacturer,model,room,expected_qty,received_qty,missing_qty,damaged_qty,issue&punchlist_id=eq.${encodeURIComponent(
-      punchlist_id
-    )}`,
-    { headers: supaHeaders(false) }
-  );
-  const items = await itRes.json();
-
-  return { pl, wo, items };
+  // simple single-line clamp
+  let t = text;
+  while (font.widthOfTextAtSize(t, size) > maxWidth && t.length > 0) {
+    t = t.slice(0, -1);
+  }
+  page.drawText(t, { x, y, size, font, color });
 }
 
-// Draw a simple table
-function drawTable(page, font, x, y, rows, widths, header) {
-  const lineH = 16;
-  const colX = [];
-  let cur = x;
-  for (const w of widths) {
-    colX.push(cur);
-    cur += w;
-  }
-
-  const headerY = y;
-  page.drawText(header[0], { x: colX[0], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-  page.drawText(header[1], { x: colX[1], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-  page.drawText(header[2], { x: colX[2], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-  page.drawText(header[3], { x: colX[3], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-  page.drawText(header[4], { x: colX[4], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-  page.drawText(header[5], { x: colX[5], y: headerY, font, size: 10, color: rgb(0.75, 0.82, 0.9) });
-
-  let yy = headerY - lineH;
-  for (const r of rows) {
-    page.drawText(q(r, "manufacturer"), { x: colX[0], y: yy, font, size: 11 });
-    page.drawText(q(r, "model"), { x: colX[1], y: yy, font, size: 11 });
-    page.drawText(q(r, "room", ""), { x: colX[2], y: yy, font, size: 11 });
-    page.drawText(String(q(r, "expected_qty", 0)), { x: colX[3], y: yy, font, size: 11 });
-    page.drawText(String(q(r, "received_qty", 0)), { x: colX[4], y: yy, font, size: 11 });
-    // Show either missing or damaged in the last slot if present; prefer missing
-    const issueQty =
-      (r.missing_qty ?? 0) > 0 ? r.missing_qty : (r.damaged_qty ?? 0) > 0 ? r.damaged_qty : 0;
-    page.drawText(String(issueQty), { x: colX[5], y: yy, font, size: 11 });
-    yy -= lineH;
-  }
+function drawTableHeader(page, x, y, w, h, fontBold) {
+  page.drawRectangle({ x, y, width: w, height: h, color: rgb(0.95, 0.95, 0.95) });
+  const cols = [
+    { key: "manufacturer", title: "Manufacturer", width: 130 },
+    { key: "model", title: "Model", width: 110 },
+    { key: "room", title: "Room", width: 70 },
+    { key: "expected_qty", title: "Exp", width: 45 },
+    { key: "received_qty", title: "Rec", width: 45 },
+    { key: "missing_qty", title: "Miss", width: 45 },
+    { key: "damaged_qty", title: "Dmg", width: 45 },
+    { key: "issue", title: "Issue", width: 140 },
+  ];
+  let cx = x + 8;
+  cols.forEach((c) => {
+    drawText(page, c.title, cx, y + h - 14, { font: fontBold, size: 10 });
+    cx += c.width;
+  });
+  // borders
+  page.drawRectangle({ x, y, width: w, height: h, borderWidth: 0.5, color: undefined, borderColor: rgb(0.7, 0.7, 0.7) });
+  return cols;
 }
 
-exports.handler = async (event) => {
-  try {
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY" }),
-      };
+function drawTableRow(page, cols, row, x, y, h, font, zebra) {
+  if (zebra) {
+    page.drawRectangle({ x, y, width: cols.reduce((a, c) => a + c.width, 0), height: h, color: rgb(0.985, 0.985, 0.985) });
+  }
+  let cx = x + 8;
+  const map = {
+    manufacturer: row.manufacturer ?? "",
+    model: row.model ?? "",
+    room: String(row.room ?? ""),
+    expected_qty: String(row.expected_qty ?? ""),
+    received_qty: String(row.received_qty ?? ""),
+    missing_qty: String(row.missing_qty ?? ""),
+    damaged_qty: String(row.damaged_qty ?? ""),
+    issue: row.issue ?? "",
+  };
+  cols.forEach((c) => {
+    drawText(page, map[c.key], cx, y + 6, { font, size: 10, maxWidth: c.width - 12 });
+    cx += c.width;
+  });
+}
+
+function drawFooter(page, font, pageNumber, pageCount) {
+  const footerY = 36;
+  drawText(page, `Generated by WPUSA • ${new Date().toLocaleString()}`, 50, footerY, {
+    font,
+    size: 9,
+    color: rgb(0.45, 0.45, 0.45),
+  });
+  const pn = `Page ${pageNumber} of ${pageCount}`;
+  const width = font.widthOfTextAtSize(pn, 9);
+  const pageWidth = page.getWidth();
+  drawText(page, pn, pageWidth - 50 - width, footerY, { font, size: 9, color: rgb(0.45, 0.45, 0.45) });
+}
+
+async function buildPdf({ branding, punchlist, items }) {
+  const pdfDoc = await PDFDocument.create();
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+  // paginate
+  const pageMargin = 50;
+  const tableRowHeight = 22;
+  const headerHeight = 24;
+  const tableWidth = 650;
+  let rowsPerPage;
+
+  // compute rows per page dynamically
+  const measureRowsPerPage = (page) => {
+    const usable = page.getHeight() - pageMargin * 2 - 180; // space for header + footer
+    return Math.floor((usable - headerHeight) / tableRowHeight);
+  };
+
+  // slice items into pages
+  let startIdx = 0;
+  let pageIndex = 0;
+  const pages = [];
+
+  while (startIdx < items.length || pageIndex === 0) {
+    const page = pdfDoc.addPage([792, 612]); // landscape letter
+    rowsPerPage = measureRowsPerPage(page);
+    const endIdx = Math.min(startIdx + rowsPerPage, items.length);
+    const pageItems = items.slice(startIdx, endIdx);
+    pages.push({ page, pageItems });
+    startIdx = endIdx;
+    pageIndex += 1;
+    if (items.length === 0 && pageIndex === 1) break;
+  }
+
+  // Pre-embed logos
+  const companyLogoImg = await embedRemoteImage(pdfDoc, branding.companyLogo);
+  const clientLogoImg = await embedRemoteImage(pdfDoc, branding.clientLogo);
+
+  // Draw each page
+  pages.forEach(({ page, pageItems }, idx) => {
+    const pageW = page.getWidth();
+    const topY = page.getHeight() - pageMargin;
+
+    // Header: Company logo & title
+    const leftX = pageMargin;
+    const rightX = pageW - pageMargin;
+
+    // Company logo
+    let logoX = leftX;
+    let logoY = topY - 40;
+    if (companyLogoImg) {
+      const dim = companyLogoImg.scale(0.25);
+      page.drawImage(companyLogoImg, { x: logoX, y: logoY, width: dim.width, height: dim.height });
+      logoX += dim.width + 10;
     }
 
-    const { punchlist_id, company_name, company_address, company_phone, company_logo, client_logo } =
-      event.queryStringParameters || {};
-
-    if (!punchlist_id) {
-      return { statusCode: 400, body: JSON.stringify({ error: "punchlist_id is required" }) };
-    }
-
-    // Load data
-    const { pl, wo, items } = await loadPunchlist(punchlist_id);
-
-    // Create PDF
-    const pdf = await PDFDocument.create();
-    const page = pdf.addPage([612, 792]); // Letter
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-
-    // Colors
-    const textColor = rgb(0.12, 0.16, 0.22);
-    const light = rgb(0.70, 0.76, 0.85);
-    const brand = rgb(0.08, 0.38, 0.73);
-
-    // Header box
-    page.drawRectangle({ x: 36, y: 720, width: 540, height: 56, color: rgb(0.95, 0.97, 1) });
-
-    // Logos (optional)
-    const leftLogoBytes = await fetchImageBytes(company_logo || COMPANY_LOGO_URL);
-    const rightLogoBytes = await fetchImageBytes(client_logo || CLIENT_LOGO_URL);
-
-    if (leftLogoBytes) {
-      const img =
-        leftLogoBytes[0] === 0x89 ? await pdf.embedPng(leftLogoBytes) : await pdf.embedJpg(leftLogoBytes);
-      const w = 120;
-      const h = (img.height / img.width) * w;
-      page.drawImage(img, { x: 44, y: 724, width: w, height: h });
-    }
-
-    if (rightLogoBytes) {
-      const img =
-        rightLogoBytes[0] === 0x89 ? await pdf.embedPng(rightLogoBytes) : await pdf.embedJpg(rightLogoBytes);
-      const w = 120;
-      const h = (img.height / img.width) * w;
-      page.drawImage(img, { x: 456, y: 724, width: w, height: h });
-    }
-
-    // Company block
-    const CNAME = company_name || COMPANY_NAME;
-    const CADDR = company_address || COMPANY_ADDRESS;
-    const CPHONE = company_phone || COMPANY_PHONE;
-
-    page.drawText(CNAME, { x: 36, y: 690, font: bold, size: 16, color: brand });
-    page.drawText(CADDR, { x: 36, y: 672, font, size: 10, color: textColor });
-    page.drawText(CPHONE, { x: 36, y: 658, font, size: 10, color: textColor });
-
-    // Title
-    page.drawText("Punchlist", { x: 540 - 100, y: 690, font: bold, size: 16, color: textColor });
-
-    // Meta row
-    const metaY = 632;
-    const meta = [
-      `Punchlist ID: ${pl.id}`,
-      `Work Order: ${q(wo || {}, "code", "—")}`,
-      `Project: ${q(wo || {}, "project", "—")}`,
-    ];
-    page.drawText(meta[0], { x: 36, y: metaY, font, size: 11, color: textColor });
-    page.drawText(meta[1], { x: 36, y: metaY - 14, font, size: 11, color: textColor });
-    page.drawText(meta[2], { x: 36, y: metaY - 28, font, size: 11, color: textColor });
-
-    // Divider
-    page.drawLine({
-      start: { x: 36, y: 585 },
-      end: { x: 576, y: 585 },
-      thickness: 1,
-      color: light,
+    // Company name + tagline
+    drawText(page, branding.companyDisplayName || FALLBACK_BRAND.companyName, logoX, topY - 10, {
+      font: fontBold,
+      size: 20,
     });
-
-    // Table
-    const tableX = 36;
-    const tableY = 560;
-    const widths = [150, 140, 60, 50, 50, 50];
-    const header = ["Manufacturer", "Model", "Room", "Exp", "Rec", "Miss/Dmg"];
-
-    drawTable(page, font, tableX, tableY, items, widths, header);
-
-    // Footer
-    page.drawText("Generated by WPUSA", {
-      x: 36,
-      y: 36,
+    drawText(page, FALLBACK_BRAND.companyTagline, logoX, topY - 28, {
+      font,
+      size: 10,
+      color: rgb(0.35, 0.35, 0.35),
+    });
+    drawText(page, FALLBACK_BRAND.companyAddress, logoX, topY - 42, {
       font,
       size: 9,
-      color: light,
+      color: rgb(0.35, 0.35, 0.35),
     });
 
-    const bytes = await pdf.save();
+    // Client logo (top-right)
+    if (clientLogoImg) {
+      const dimR = clientLogoImg.scale(0.22);
+      page.drawImage(clientLogoImg, {
+        x: rightX - dimR.width,
+        y: topY - dimR.height,
+        width: dimR.width,
+        height: dimR.height,
+      });
+    }
 
+    // Big title
+    drawText(page, "WPUSA — Punchlist", leftX, topY - 70, { font: fontBold, size: 22 });
+
+    // Meta
+    const metaY = topY - 90;
+    drawText(page, `Punchlist ID: ${punchlist.pl.id}`, leftX, metaY, { font, size: 10 });
+    drawText(page, `Work Order: ${branding.workOrderCode}`, leftX, metaY - 14, { font, size: 10 });
+    drawText(page, `Project: ${branding.projectName}`, leftX, metaY - 28, { font, size: 10 });
+
+    // Table
+    const tableX = leftX;
+    let tableY = topY - 140;
+    const cols = drawTableHeader(page, tableX, tableY, tableWidth, headerHeight, fontBold);
+    tableY -= headerHeight;
+
+    if (pageItems.length === 0) {
+      drawText(page, "No items.", tableX + 8, tableY - 14, { font, size: 11, color: rgb(0.45, 0.45, 0.45) });
+    } else {
+      pageItems.forEach((row, i) => {
+        drawTableRow(page, cols, row, tableX, tableY - tableRowHeight, tableRowHeight, font, i % 2 === 1);
+        tableY -= tableRowHeight;
+      });
+    }
+
+    // Signature block
+    const sigTop = pageMargin + 90;
+    page.drawLine({ start: { x: leftX, y: sigTop }, end: { x: leftX + 220, y: sigTop }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    drawText(page, "Technician Signature / Date", leftX, sigTop - 12, { font, size: 9, color: rgb(0.35, 0.35, 0.35) });
+
+    page.drawLine({ start: { x: leftX + 280, y: sigTop }, end: { x: leftX + 500, y: sigTop }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    drawText(page, "Client Signature / Date", leftX + 280, sigTop - 12, { font, size: 9, color: rgb(0.35, 0.35, 0.35) });
+
+    // Footer (added later with correct page counts)
+  });
+
+  // Footer with page numbers
+  const pageCount = pdfDoc.getPageCount();
+  for (let i = 0; i < pageCount; i++) {
+    drawFooter(pdfDoc.getPage(i), await pdfDoc.embedFont(StandardFonts.HelveticaOblique), i + 1, pageCount);
+  }
+
+  return pdfDoc.save();
+}
+
+export const handler = async (event) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      return { statusCode: 500, body: "Missing Supabase env vars" };
+    }
+    const { punchlist_id } = event.queryStringParameters || {};
+    if (!punchlist_id) {
+      return { statusCode: 400, body: "Provide ?punchlist_id=..." };
+    }
+
+    const { pl, items } = await getPunchlistWithItems(punchlist_id);
+    const branding = await getWorkOrderBrand(pl.work_order_id);
+
+    const pdfBytes = await buildPdf({ branding, punchlist: { pl }, items });
     return {
       statusCode: 200,
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `inline; filename="punchlist-${pl.id}.pdf"`,
       },
-      body: Buffer.from(bytes).toString("base64"),
+      body: Buffer.from(pdfBytes).toString("base64"),
       isBase64Encoded: true,
     };
   } catch (err) {
-    return { statusCode: 500, body: JSON.stringify({ error: String(err.message) }) };
+    return { statusCode: 500, body: `Error: ${err.message}` };
   }
 };
